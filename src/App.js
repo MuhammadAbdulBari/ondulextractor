@@ -1,7 +1,11 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { saveAs } from "file-saver";
 import * as XLSX from "xlsx";
 import "./App.css";
+
+// 🔑 Set your secret key here
+const SECRET_KEY = "ONDULEX2025"; 
+const SESSION_DURATION = 24 * 60 * 60 * 1000; // 1 day in ms
 
 function App() {
   const [activeTab, setActiveTab] = useState("search");
@@ -11,8 +15,40 @@ function App() {
   const [error, setError] = useState("");
   const [nextPage, setNextPage] = useState(null);
 
+  // auth states
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [enteredKey, setEnteredKey] = useState("");
+
   // keep service instance in a ref so it's not recreated
   const serviceRef = useRef(null);
+
+  // ✅ Check session on app load
+  useEffect(() => {
+    const savedSession = localStorage.getItem("onduleSession");
+    if (savedSession) {
+      const sessionData = JSON.parse(savedSession);
+      if (Date.now() < sessionData.expiry) {
+        setIsAuthenticated(true);
+      } else {
+        localStorage.removeItem("onduleSession"); // expired
+      }
+    }
+  }, []);
+
+  // ✅ Handle login
+  const handleLogin = (e) => {
+    e.preventDefault();
+    if (enteredKey === SECRET_KEY) {
+      const expiry = Date.now() + SESSION_DURATION;
+      localStorage.setItem(
+        "onduleSession",
+        JSON.stringify({ key: SECRET_KEY, expiry })
+      );
+      setIsAuthenticated(true);
+    } else {
+      alert("❌ Invalid key. Please try again.");
+    }
+  };
 
   // stable callback for Google Places
   const placesCallback = (res, status, pagination) => {
@@ -121,6 +157,30 @@ function App() {
     );
   };
 
+  // 🔐 Show login screen first if not authenticated
+  if (!isAuthenticated) {
+    return (
+      <div className="login-screen" style={{ textAlign: "center", marginTop: "100px" }}>
+        <h1>🔑 Enter Access Key</h1>
+        <form onSubmit={handleLogin} style={{ marginTop: "20px" }}>
+          <input
+            type="password"
+            value={enteredKey}
+            onChange={(e) => setEnteredKey(e.target.value)}
+            placeholder="Enter your key..."
+            required
+            style={{ padding: "10px", width: "250px" }}
+          />
+          <br />
+          <button type="submit" style={{ marginTop: "15px", padding: "10px 20px" }}>
+            Unlock
+          </button>
+        </form>
+      </div>
+    );
+  }
+
+  // ✅ Main app after login
   return (
     <div className="App">
       {activeTab === "search" && (
