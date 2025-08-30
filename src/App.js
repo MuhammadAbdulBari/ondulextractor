@@ -4,7 +4,7 @@ import * as XLSX from "xlsx";
 import "./App.css";
 
 // 🔑 Set your secret key here
-const SECRET_KEY = "ONDULEX2025"; 
+const SECRET_KEY = "ondulex&098"; 
 const SESSION_DURATION = 24 * 60 * 60 * 1000; // 1 day in ms
 
 function App() {
