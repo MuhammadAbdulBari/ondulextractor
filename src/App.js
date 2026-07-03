@@ -402,11 +402,11 @@ const ResultCard = ({ result }) => (
           alt={result.name}
         />
       ) : (
-        <img
-          className="lead-img"
-          src="https://via.placeholder.com/400x200?text=No+Image"
-          alt="No Image"
-        />
+       <img
+  className="lead-img"
+  src="https://via.placeholder.com/400x200?text=No+Image"
+  alt="No preview available"
+/>
       )}
 
       <div className="lead-name">{result.name || "N/A"}</div>
