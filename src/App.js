@@ -51,38 +51,42 @@ function App() {
   };
 
   // stable callback for Google Places
-  const placesCallback = (res, status, pagination) => {
-    if (status === window.google.maps.places.PlacesServiceStatus.OK) {
-      // For each place, fetch details (phone, website, etc.)
-      res.forEach((place) => {
-        serviceRef.current.getDetails(
-          {
-            placeId: place.place_id,
-            fields: [
-              "name",
-              "formatted_address",
-              "formatted_phone_number",
-              "website",
-              "rating",
-              "user_ratings_total",
-              "photos",
-            ],
-          },
-          (details, detailsStatus) => {
-            if (detailsStatus === window.google.maps.places.PlacesServiceStatus.OK) {
-              setResults((prev) => [...prev, details]);
-            } else {
-              // fallback if details fails
-              setResults((prev) => [...prev, place]);
+const placesCallback = (res, status, pagination) => {
+  if (status === window.google.maps.places.PlacesServiceStatus.OK) {
+    // wrap each getDetails call in a Promise so we can wait for all of them
+    const detailPromises = res.map(
+      (place) =>
+        new Promise((resolve) => {
+          serviceRef.current.getDetails(
+            {
+              placeId: place.place_id,
+              fields: [
+                "name",
+                "formatted_address",
+                "formatted_phone_number",
+                "website",
+                "rating",
+                "user_ratings_total",
+                "photos",
+              ],
+            },
+            (details, detailsStatus) => {
+              if (detailsStatus === window.google.maps.places.PlacesServiceStatus.OK) {
+                resolve(details);
+              } else {
+                // fallback if details fails
+                resolve(place);
+              }
             }
-          }
-        );
-      });
+          );
+        })
+    );
 
+    Promise.all(detailPromises).then((allDetails) => {
+      setResults((prev) => [...prev, ...allDetails]);
       setActiveTab("results");
 
       if (pagination && pagination.hasNextPage) {
-        // ✅ store the callback correctly
         setNextPage(() => () => {
           // must wait at least 2s before calling nextPage()
           setTimeout(() => {
@@ -92,12 +96,15 @@ function App() {
       } else {
         setNextPage(null);
       }
-    } else {
-      setError("Google Places request failed: " + status);
-    }
-    setLoading(false);
-  };
 
+      // only stop "loading" once every detail call for this page is done
+      setLoading(false);
+    });
+  } else {
+    setError("Google Places request failed: " + status);
+    setLoading(false);
+  }
+};
   const handleSearch = async (e) => {
     e.preventDefault();
     if (!query.trim()) return;
