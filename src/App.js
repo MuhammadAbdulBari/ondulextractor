@@ -405,7 +405,7 @@ const ResultCard = ({ result }) => (
        <img
   className="lead-img"
   src="https://via.placeholder.com/400x200?text=No+Image"
-  alt="No preview available"
+  alt=""
 />
       )}
 
