@@ -4,7 +4,7 @@ import * as XLSX from "xlsx";
 import "./App.css";
 
 // 🔑 Set your secret key here
-const SECRET_KEY = "ondulex&098"; 
+const SECRET_KEY = "ondulex&098";
 const SESSION_DURATION = 24 * 60 * 60 * 1000; // 1 day in ms
 
 function App() {
@@ -13,14 +13,18 @@ function App() {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [nextPage, setNextPage] = useState(null);
+  const [hasMore, setHasMore] = useState(false);
 
   // auth states
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [enteredKey, setEnteredKey] = useState("");
 
-  // keep service instance in a ref so it's not recreated
+  // keep service + map + pagination in refs so they're stable across renders
+  // and never captured in a stale closure
   const serviceRef = useRef(null);
+  const mapRef = useRef(null);
+  const paginationRef = useRef(null);
+  const isFetchingRef = useRef(false); // hard guard against double-calls
 
   // ✅ Check session on app load
   useEffect(() => {
@@ -50,14 +54,48 @@ function App() {
     }
   };
 
-  // stable callback for Google Places
-const placesCallback = (res, status, pagination) => {
-  if (status === window.google.maps.places.PlacesServiceStatus.OK) {
-    // wrap each getDetails call in a Promise so we can wait for all of them
-    const detailPromises = res.map(
+  // Get (or lazily create) a single stable, DOM-attached, properly
+  // initialized map + PlacesService. Reusing the SAME service instance
+  // across the whole session (search + all "load more" pages) instead of
+  // recreating it every search is important for pagination reliability.
+  const getService = () => {
+    if (!window.google) {
+      throw new Error("Google Maps SDK not loaded. Check index.html script.");
+    }
+
+    if (!mapRef.current) {
+      // A real, DOM-attached div with center/zoom set — some Places
+      // Service behavior (including pagination) has been reported as
+      // flakier on fully detached / unconfigured map instances.
+      const container = document.createElement("div");
+      container.style.display = "none";
+      document.body.appendChild(container);
+
+      mapRef.current = new window.google.maps.Map(container, {
+        center: { lat: 0, lng: 0 },
+        zoom: 2,
+      });
+    }
+
+    if (!serviceRef.current) {
+      serviceRef.current = new window.google.maps.places.PlacesService(
+        mapRef.current
+      );
+    }
+
+    return serviceRef.current;
+  };
+
+  // Fetch details for a batch of place results, waiting for ALL of them
+  // to resolve before we touch loading/pagination state again. This
+  // prevents "Load More" from becoming clickable (and firing nextPage())
+  // while getDetails() calls from the previous page are still in flight
+  // on the same PlacesService instance.
+  const fetchDetailsForResults = (service, placesResults) => {
+    const detailPromises = placesResults.map(
       (place) =>
         new Promise((resolve) => {
-          serviceRef.current.getDetails(
+          service.getDetails(
             {
               placeId: place.place_id,
               fields: [
@@ -71,10 +109,13 @@ const placesCallback = (res, status, pagination) => {
               ],
             },
             (details, detailsStatus) => {
-              if (detailsStatus === window.google.maps.places.PlacesServiceStatus.OK) {
+              if (
+                detailsStatus ===
+                window.google.maps.places.PlacesServiceStatus.OK
+              ) {
                 resolve(details);
               } else {
-                // fallback if details fails
+                // fallback if details fails — keep the basic result
                 resolve(place);
               }
             }
@@ -82,59 +123,97 @@ const placesCallback = (res, status, pagination) => {
         })
     );
 
-    Promise.all(detailPromises).then((allDetails) => {
-      setResults((prev) => [...prev, ...allDetails]);
-      setActiveTab("results");
+    return Promise.all(detailPromises);
+  };
 
-      if (pagination && pagination.hasNextPage) {
-        setNextPage(() => () => {
-          // must wait at least 2s before calling nextPage()
-          setTimeout(() => {
-            pagination.nextPage();
-          }, 2000);
+  // Shared handler for both the initial textSearch AND every nextPage()
+  // call (Google reuses the same callback for pagination pages).
+  const placesCallback = (res, status, pagination) => {
+    if (status === window.google.maps.places.PlacesServiceStatus.OK && res) {
+      const service = serviceRef.current;
+
+      fetchDetailsForResults(service, res)
+        .then((allDetails) => {
+          setResults((prev) => [...prev, ...allDetails]);
+          setActiveTab("results");
+
+          paginationRef.current = pagination || null;
+          setHasMore(!!(pagination && pagination.hasNextPage));
+        })
+        .catch((err) => {
+          console.error("Error fetching place details:", err);
+          setError("Something went wrong while fetching place details.");
+        })
+        .finally(() => {
+          setLoading(false);
+          isFetchingRef.current = false;
         });
-      } else {
-        setNextPage(null);
-      }
-
-      // only stop "loading" once every detail call for this page is done
+    } else {
+      console.error("Places request failed. Status:", status, "Result:", res);
+      setError("Google Places request failed: " + status);
       setLoading(false);
-    });
-  } else {
-    setError("Google Places request failed: " + status);
-    setLoading(false);
-  }
-};
+      isFetchingRef.current = false;
+      paginationRef.current = null;
+      setHasMore(false);
+    }
+  };
+
   const handleSearch = async (e) => {
     e.preventDefault();
     if (!query.trim()) return;
+    if (isFetchingRef.current) return; // guard against double submit
 
     setLoading(true);
     setError("");
     setResults([]);
-    setNextPage(null);
+    paginationRef.current = null;
+    setHasMore(false);
+    isFetchingRef.current = true;
 
     try {
-      if (!window.google) {
-        throw new Error("Google Maps SDK not loaded. Check index.html script.");
-      }
-
-      const map = new window.google.maps.Map(document.createElement("div"));
-      serviceRef.current = new window.google.maps.places.PlacesService(map);
-
+      const service = getService();
       const request = { query };
-      serviceRef.current.textSearch(request, placesCallback);
+      service.textSearch(request, placesCallback);
     } catch (err) {
+      console.error("Search error:", err);
       setError(err.message || "An error occurred");
       setLoading(false);
+      isFetchingRef.current = false;
     }
   };
 
   const loadMore = () => {
-    if (nextPage) {
-      setLoading(true);
-      nextPage(); // ✅ safe call now
+    // Hard guards: must have a valid pagination object, it must still
+    // report hasNextPage, and we must not already be mid-fetch.
+    if (!paginationRef.current) return;
+    if (!paginationRef.current.hasNextPage) {
+      setHasMore(false);
+      return;
     }
+    if (isFetchingRef.current) return;
+
+    isFetchingRef.current = true;
+    setLoading(true);
+
+    // Google requires a short delay before calling nextPage() after the
+    // previous page finished rendering.
+    setTimeout(() => {
+      // Re-check right before firing, in case state changed during the delay
+      if (paginationRef.current && paginationRef.current.hasNextPage) {
+        try {
+          paginationRef.current.nextPage();
+        } catch (err) {
+          console.error("nextPage() threw:", err);
+          setError("Could not load more results. Please try searching again.");
+          setLoading(false);
+          isFetchingRef.current = false;
+        }
+      } else {
+        setLoading(false);
+        isFetchingRef.current = false;
+        setHasMore(false);
+      }
+    }, 2000);
   };
 
   const downloadExcel = () => {
@@ -208,7 +287,7 @@ const placesCallback = (res, status, pagination) => {
           onBack={() => setActiveTab("search")}
           onDownload={downloadExcel}
           onLoadMore={loadMore}
-          hasMore={!!nextPage}
+          hasMore={hasMore}
         />
       )}
 
