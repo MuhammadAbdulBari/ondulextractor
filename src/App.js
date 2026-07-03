@@ -399,7 +399,7 @@ const ResultCard = ({ result }) => (
         <img
           className="lead-img"
           src={result.photos[0].getUrl({ maxWidth: 400 })}
-          alt={result.name}
+          alt=""
         />
       ) : (
 //        <img
