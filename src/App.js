@@ -399,13 +399,12 @@ const ResultCard = ({ result }) => (
         <img
           className="lead-img"
           src={result.photos[0].getUrl({ maxWidth: 400 })}
-          alt=""
         />
       ) : (
 //        <img
 //   className="lead-img"
 //   src="https://via.placeholder.com/400x200?text=No+Image"
-//   alt=""
+
 // />
       )}
 
