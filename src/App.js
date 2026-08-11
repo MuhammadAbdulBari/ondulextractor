@@ -1,657 +1,539 @@
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,340;0,9..144,500;0,9..144,600;1,9..144,500;1,9..144,600&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+import React, { useState, useRef, useEffect } from "react";
+import { saveAs } from "file-saver";
+import * as XLSX from "xlsx";
+import "./App.css";
 
-/* ------------------------------------------------------------------ */
-/*  Tokens                                                             */
-/* ------------------------------------------------------------------ */
+// 🔑 Set your secret key here
+const SECRET_KEY = "ondulex&098";
+const SESSION_DURATION = 24 * 60 * 60 * 1000; // 1 day in ms
 
-:root {
-  --ink: #0f1b28;
-  --ink-2: #14233570;
-  --panel: #17263a;
-  --panel-border: #2a3d54;
-  --parchment: #ede3c8;
-  --parchment-2: #e3d7b3;
-  --parchment-ink: #22293163;
-  --brass: #c8992f;
-  --brass-light: #e3b94f;
-  --rust: #b8503f;
-  --mist: #91a6b9;
-  --ink-text: #1c2733;
+// 🗺️ Paste the SAME Google Maps API key you already have in index.html's
+// script tag (the one after "key="). This app now talks to the Places API
+// (New) directly over HTTPS instead of the deprecated PlacesService, so it
+// no longer needs the Maps JavaScript SDK loaded at all — you can remove
+// the <script src="https://maps.googleapis.com/maps/api/js?key=...">
+// line from index.html once this is working, if nothing else on the page
+// needs it.
+const GOOGLE_PLACES_API_KEY = "AIzaSyBS1UFMCHiubIkXhWXV8DAgluIYDIeZlb8";
 
-  --font-display: "Fraunces", Georgia, serif;
-  --font-body: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+const PLACES_FIELD_MASK = [
+  "places.id",
+  "places.displayName",
+  "places.formattedAddress",
+  "places.nationalPhoneNumber",
+  "places.websiteUri",
+  "places.rating",
+  "places.userRatingCount",
+  "places.photos",
+  "nextPageToken",
+].join(",");
 
-  --radius: 3px;
-}
+// Text Search (New): https://places.googleapis.com/v1/places:searchText
+// Returns places + phone/website/rating in ONE request (no separate
+// getDetails() call needed), and paginates with a real nextPageToken
+// instead of the legacy client-side pagination object.
+async function fetchPlacesPage(query, pageToken) {
+  const body = { textQuery: query, pageSize: 20 };
+  if (pageToken) body.pageToken = pageToken;
 
-* {
-  box-sizing: border-box;
-}
+  const response = await fetch("https://places.googleapis.com/v1/places:searchText", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
+      "X-Goog-FieldMask": PLACES_FIELD_MASK,
+    },
+    body: JSON.stringify(body),
+  });
 
-html,
-body {
-  margin: 0;
-  padding: 0;
-  background: var(--ink);
-  color: var(--parchment);
-  font-family: var(--font-body);
-  -webkit-font-smoothing: antialiased;
-}
-
-.App {
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-}
-
-a {
-  color: inherit;
-}
-
-button {
-  font-family: var(--font-body);
-  cursor: pointer;
-}
-
-button:focus-visible,
-input:focus-visible,
-a:focus-visible {
-  outline: 2px solid var(--brass-light);
-  outline-offset: 3px;
-}
-
-.eyebrow {
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--brass);
-  margin: 0 0 0.6rem;
-}
-
-.field-label {
-  display: block;
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--mist);
-  margin-bottom: 0.5rem;
-}
-
-.muted {
-  color: var(--mist);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Tick rule — decorative chart-edge scale, reused across screens     */
-/* ------------------------------------------------------------------ */
-
-.tick-rule {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-end;
-  padding: 0 clamp(1.5rem, 6vw, 5rem);
-  height: 16px;
-  opacity: 0.5;
-}
-
-.tick {
-  width: 1px;
-  height: 5px;
-  background: var(--brass);
-  opacity: 0.55;
-}
-
-.tick--major {
-  height: 10px;
-  opacity: 0.85;
-}
-
-@media (max-width: 640px) {
-  .tick-rule {
-    display: none;
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null);
+    const message = errorBody?.error?.message || `Places API error (HTTP ${response.status})`;
+    throw new Error(message);
   }
+
+  return response.json(); // { places: [...], nextPageToken? }
+}
+
+// Builds an <img> src for a Places (New) photo resource.
+function photoUrl(photo, maxWidthPx = 400) {
+  if (!photo?.name) return null;
+  return `https://places.googleapis.com/v1/${photo.name}/media?maxWidthPx=${maxWidthPx}&key=${GOOGLE_PLACES_API_KEY}`;
 }
 
 /* ------------------------------------------------------------------ */
-/*  Compass rose — the signature mark                                 */
+/*  Icon set — small line marks, drawn once, reused everywhere.        */
+/*  No icon font dependency: every mark below is inline SVG.           */
 /* ------------------------------------------------------------------ */
 
-.compass-rose {
-  color: var(--brass);
-  display: block;
-}
+const CompassRose = ({ spinning = false, size = 56 }) => (
+  <svg
+    className={`compass-rose${spinning ? " compass-rose--spinning" : ""}`}
+    width={size}
+    height={size}
+    viewBox="0 0 64 64"
+    fill="none"
+    aria-hidden="true"
+  >
+    <circle cx="32" cy="32" r="29" stroke="currentColor" strokeWidth="1" opacity="0.45" />
+    <circle cx="32" cy="32" r="21" stroke="currentColor" strokeWidth="1" opacity="0.25" />
+    {[0, 90, 180, 270].map((deg) => (
+      <line key={deg} x1="32" y1="3" x2="32" y2="9" stroke="currentColor" strokeWidth="1.5" transform={`rotate(${deg} 32 32)`} />
+    ))}
+    {[45, 135, 225, 315].map((deg) => (
+      <line key={deg} x1="32" y1="6" x2="32" y2="10" stroke="currentColor" strokeWidth="1" opacity="0.5" transform={`rotate(${deg} 32 32)`} />
+    ))}
+    <polygon points="32,10 37,32 32,29.5 27,32" className="compass-needle-brass" />
+    <polygon points="32,54 37,32 32,34.5 27,32" className="compass-needle-dark" />
+    <circle cx="32" cy="32" r="2.4" fill="currentColor" />
+    <text x="32" y="15.5" textAnchor="middle" className="compass-label">N</text>
+  </svg>
+);
 
-.compass-needle-brass {
-  fill: var(--brass-light);
-}
+const PinIcon = ({ size = 15 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M12 21s-6.5-6.1-6.5-11A6.5 6.5 0 0 1 18.5 10c0 4.9-6.5 11-6.5 11z" />
+    <circle cx="12" cy="10" r="2.2" />
+  </svg>
+);
 
-.compass-needle-dark {
-  fill: var(--mist);
-  opacity: 0.55;
-}
+const PhoneIcon = ({ size = 15 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M6.6 10.8c1.4 2.7 3.6 4.9 6.3 6.3l2.1-2.1c.3-.3.7-.4 1.1-.3 1.2.4 2.5.6 3.8.6.6 0 1.1.5 1.1 1.1V20c0 .6-.5 1.1-1.1 1.1C10.6 21.1 2.9 13.4 2.9 4.1 2.9 3.5 3.4 3 4 3h3.6c.6 0 1.1.5 1.1 1.1 0 1.3.2 2.6.6 3.8.1.4 0 .8-.3 1.1L6.6 10.8z" />
+  </svg>
+);
 
-.compass-label {
-  font-family: var(--font-mono);
-  font-size: 7px;
-  fill: var(--brass);
-  letter-spacing: 0.05em;
-}
+const GlobeIcon = ({ size = 15 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <circle cx="12" cy="12" r="9" />
+    <path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z" />
+  </svg>
+);
 
-@media (prefers-reduced-motion: no-preference) {
-  .compass-rose--spinning {
-    animation: compass-spin 2.4s linear infinite;
+const StarIcon = ({ size = 12 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M12 2.5l2.9 6.3 6.7.7-5 4.7 1.4 6.8L12 17.6l-6 3.4 1.4-6.8-5-4.7 6.7-.7L12 2.5z" />
+  </svg>
+);
+
+const ArrowLeftIcon = ({ size = 15 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M19 12H5M11 6l-6 6 6 6" />
+  </svg>
+);
+
+const DownloadIcon = ({ size = 15 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M12 3v12m0 0l-4.5-4.5M12 15l4.5-4.5M4 19h16" />
+  </svg>
+);
+
+const KeyIcon = ({ size = 20 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <circle cx="8" cy="15" r="4" />
+    <path d="M11 12l7-7m0 0h4m-4 0v4m-2-2l2 2" />
+  </svg>
+);
+
+/* Purely decorative ruler of tick marks — echoes a chart's edge scale. */
+const TickRule = ({ count = 48 }) => (
+  <div className="tick-rule" aria-hidden="true">
+    {Array.from({ length: count }).map((_, i) => (
+      <span key={i} className={i % 6 === 0 ? "tick tick--major" : "tick"} />
+    ))}
+  </div>
+);
+
+function App() {
+  const [activeTab, setActiveTab] = useState("search");
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [hasMore, setHasMore] = useState(false);
+
+  // auth states
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [enteredKey, setEnteredKey] = useState("");
+
+  // kept in refs so they're stable across renders and never captured in a
+  // stale closure
+  const nextPageTokenRef = useRef(null);
+  const isFetchingRef = useRef(false); // hard guard against double-calls
+
+  // ✅ Check session on app load
+  useEffect(() => {
+    const savedSession = localStorage.getItem("onduleSession");
+    if (savedSession) {
+      const sessionData = JSON.parse(savedSession);
+      if (Date.now() < sessionData.expiry) {
+        setIsAuthenticated(true);
+      } else {
+        localStorage.removeItem("onduleSession"); // expired
+      }
+    }
+  }, []);
+
+  // ✅ Handle login
+  const handleLogin = (e) => {
+    e.preventDefault();
+    if (enteredKey === SECRET_KEY) {
+      const expiry = Date.now() + SESSION_DURATION;
+      localStorage.setItem(
+        "onduleSession",
+        JSON.stringify({ key: SECRET_KEY, expiry })
+      );
+      setIsAuthenticated(true);
+    } else {
+      alert("❌ Invalid key. Please try again.");
+    }
+  };
+
+  // Runs a Text Search (New) page and appends results to state.
+  // Shared by both the initial search and "Load More".
+  const runSearch = async (pageToken) => {
+    setLoading(true);
+    setError("");
+    isFetchingRef.current = true;
+
+    try {
+      const data = await fetchPlacesPage(query, pageToken);
+      const places = data.places || [];
+
+      setResults((prev) => (pageToken ? [...prev, ...places] : places));
+      setActiveTab("results");
+
+      nextPageTokenRef.current = data.nextPageToken || null;
+      setHasMore(!!data.nextPageToken);
+    } catch (err) {
+      console.error("Places API request failed:", err);
+      setError(err.message || "Google Places request failed.");
+      nextPageTokenRef.current = null;
+      setHasMore(false);
+    } finally {
+      setLoading(false);
+      isFetchingRef.current = false;
+    }
+  };
+
+  const handleSearch = async (e) => {
+    e.preventDefault();
+    if (!query.trim()) return;
+    if (isFetchingRef.current) return;
+
+    setResults([]);
+    nextPageTokenRef.current = null;
+    setHasMore(false);
+
+    runSearch(null);
+  };
+
+  const loadMore = () => {
+    if (!nextPageTokenRef.current) return;
+    if (isFetchingRef.current) return;
+
+    // A freshly issued nextPageToken needs a short moment before Google
+    // will accept it — matches Google's own guidance for Text Search
+    // pagination.
+    setLoading(true);
+    isFetchingRef.current = true;
+    setTimeout(() => {
+      runSearch(nextPageTokenRef.current);
+    }, 2000);
+  };
+
+  const downloadExcel = () => {
+    const worksheet = XLSX.utils.json_to_sheet(
+      results.map((item) => ({
+        Name: item.displayName?.text || "N/A",
+        Address: item.formattedAddress || "N/A",
+        Phone: item.nationalPhoneNumber || "N/A",
+        Website: item.websiteUri || "N/A",
+        Rating: item.rating ?? "N/A",
+        "Total Reviews": item.userRatingCount ?? "0",
+      }))
+    );
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Google Leads");
+
+    const excelBuffer = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
+    const data = new Blob([excelBuffer], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+
+    const sanitizedQuery = query.replace(/[^a-zA-Z0-9_-]/g, "_");
+    saveAs(
+      data,
+      `leads_${sanitizedQuery}_${new Date().toISOString().slice(0, 10)}.xlsx`
+    );
+  };
+
+  // 🔐 Login gate
+  if (!isAuthenticated) {
+    return (
+      <div className="login-screen">
+        <div className="login-grid" aria-hidden="true" />
+        <div className="login-card">
+          <div className="login-icon"><KeyIcon /></div>
+          <p className="eyebrow">Restricted log</p>
+          <h1 className="login-title">Access key required</h1>
+          <p className="login-sub">This manifest is private. Enter your key to open it.</p>
+          <form onSubmit={handleLogin} className="login-form">
+            <label htmlFor="access-key" className="field-label">Key</label>
+            <input
+              id="access-key"
+              type="password"
+              value={enteredKey}
+              onChange={(e) => setEnteredKey(e.target.value)}
+              placeholder="••••••••••"
+              required
+              autoFocus
+            />
+            <button type="submit" className="btn-stamp btn-stamp--full">
+              Unlock log <span aria-hidden="true">→</span>
+            </button>
+          </form>
+        </div>
+      </div>
+    );
   }
+
+  return (
+    <div className="App">
+      {activeTab === "search" && (
+        <SearchSection
+          query={query}
+          setQuery={setQuery}
+          handleSearch={handleSearch}
+          loading={loading}
+        />
+      )}
+
+      {activeTab === "results" && (
+        <ResultsSection
+          query={query}
+          results={results}
+          loading={loading}
+          error={error}
+          onBack={() => setActiveTab("search")}
+          onDownload={downloadExcel}
+          onLoadMore={loadMore}
+          hasMore={hasMore}
+        />
+      )}
+
+      <Footer />
+    </div>
+  );
 }
 
-@keyframes compass-spin {
-  to {
-    transform: rotate(360deg);
+/* ------------------------------------------------------------------ */
+/*  Search — the chart room                                           */
+/* ------------------------------------------------------------------ */
+
+const SearchSection = ({ query, setQuery, handleSearch, loading }) => (
+  <section className="chart-hero">
+    <div className="chart-grid" aria-hidden="true" />
+    <TickRule count={40} />
+
+    <div className="hero-content">
+      <div className="compass-wrap">
+        <CompassRose spinning={loading} size={64} />
+      </div>
+
+      <p className="eyebrow">Prospect Log · sourced from Google Maps</p>
+      <h1 className="hero-title">
+        Plot your next
+        <br />
+        <em>leads.</em>
+      </h1>
+      <p className="hero-sub">
+        Enter a place or a trade below. Every business we find gets logged
+        with its name, number, address and rating — ready to export.
+      </p>
+
+      <form className="log-entry-form" onSubmit={handleSearch}>
+        <label htmlFor="query" className="field-label">Entry</label>
+        <div className="log-entry-row">
+          <input
+            id="query"
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Restaurants in Karachi"
+            required
+            disabled={loading}
+          />
+          <button type="submit" className="btn-stamp" disabled={loading}>
+            {loading ? "Charting…" : "Chart it"}
+            {!loading && <span aria-hidden="true">→</span>}
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <TickRule count={40} />
+  </section>
+);
+
+/* ------------------------------------------------------------------ */
+/*  Results — the manifest                                            */
+/* ------------------------------------------------------------------ */
+
+const ResultsSection = ({
+  query,
+  results,
+  loading,
+  error,
+  onBack,
+  onDownload,
+  onLoadMore,
+  hasMore,
+}) => (
+  <div className="manifest">
+    <header className="manifest-header">
+      <button onClick={onBack} className="back-link">
+        <ArrowLeftIcon /> Back to search
+      </button>
+      <p className="eyebrow">Manifest for</p>
+      <h2 className="manifest-title">{query}</h2>
+      <p className="manifest-count">
+        {results.length} {results.length === 1 ? "entry" : "entries"} charted
+        {hasMore ? " · more available" : ""}
+      </p>
+    </header>
+
+    {error && (
+      <div className="alert-rust" role="alert">
+        {error}
+      </div>
+    )}
+
+    {loading && results.length === 0 && (
+      <div className="state-block">
+        <CompassRose spinning size={48} />
+        <p>Charting the area…</p>
+      </div>
+    )}
+
+    {results.length > 0 && (
+      <>
+        <div className="card-grid">
+          {results.map((result, index) => (
+            <ResultCard key={index} result={result} index={index} />
+          ))}
+        </div>
+
+        <div className="manifest-actions">
+          <button onClick={onDownload} className="btn-stamp">
+            <DownloadIcon /> Export manifest
+          </button>
+          {hasMore && (
+            <button onClick={onLoadMore} className="btn-ghost" disabled={loading}>
+              {loading ? "Charting…" : "Chart more"}
+            </button>
+          )}
+        </div>
+      </>
+    )}
+
+    {!loading && results.length === 0 && !error && (
+      <div className="state-block">
+        <PinIcon size={26} />
+        <p>Nothing charted yet.</p>
+        <p className="muted">Try a different place or trade.</p>
+      </div>
+    )}
+  </div>
+);
+
+/* ------------------------------------------------------------------ */
+/*  Result card — one logged entry                                    */
+/* ------------------------------------------------------------------ */
+
+const ResultCard = ({ result, index }) => {
+  const entryNo = String(index + 1).padStart(2, "0");
+  const name = result.displayName?.text;
+  const photoSrc = result.photos?.[0] ? photoUrl(result.photos[0]) : null;
+  let hostname = null;
+  if (result.websiteUri) {
+    try {
+      hostname = new URL(result.websiteUri).hostname.replace(/^www\./, "");
+    } catch (e) {
+      hostname = result.websiteUri;
+    }
   }
-}
 
-/* ------------------------------------------------------------------ */
-/*  Search hero — the chart room                                      */
-/* ------------------------------------------------------------------ */
+  return (
+    <article className="chart-card">
+      <div className="card-top-row">
+        <span className="entry-no">Entry № {entryNo}</span>
+        {result.rating && (
+          <span className="rating-seal">
+            <StarIcon /> {result.rating}
+          </span>
+        )}
+      </div>
 
-.chart-hero {
-  position: relative;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  min-height: 100vh;
-  overflow: hidden;
-  padding: 1.75rem 0;
-}
+      <div className="card-media">
+        {photoSrc ? (
+          <img
+            className="card-media-img"
+            src={photoSrc}
+            alt={name || "Business photo"}
+          />
+        ) : (
+          <div className="card-media-empty">
+            <PinIcon size={20} />
+          </div>
+        )}
+      </div>
 
-.chart-grid {
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(var(--panel-border) 1px, transparent 1px),
-    linear-gradient(90deg, var(--panel-border) 1px, transparent 1px);
-  background-size: 44px 44px;
-  opacity: 0.22;
-  mask-image: radial-gradient(ellipse at center, black 5%, transparent 78%);
-}
+      <h3 className="card-name">{name || "Unnamed entry"}</h3>
 
-.hero-content {
-  position: relative;
-  z-index: 1;
-  max-width: 640px;
-  margin: auto;
-  padding: 3rem 1.75rem;
-  text-align: center;
-}
+      <dl className="card-detail-list">
+        <div className="detail-row">
+          <PinIcon />
+          <dd>{result.formattedAddress || "No address on file"}</dd>
+        </div>
+        <div className="detail-row">
+          <PhoneIcon />
+          <dd>{result.nationalPhoneNumber || "No number on file"}</dd>
+        </div>
+        <div className="detail-row">
+          <GlobeIcon />
+          <dd>
+            {result.websiteUri ? (
+              <a href={result.websiteUri} target="_blank" rel="noopener noreferrer">
+                {hostname}
+              </a>
+            ) : (
+              "No website on file"
+            )}
+          </dd>
+        </div>
+      </dl>
 
-.compass-wrap {
-  display: inline-flex;
-  margin-bottom: 1.5rem;
-}
-
-.hero-title {
-  font-family: var(--font-display);
-  font-weight: 500;
-  font-size: clamp(2.4rem, 6vw, 3.6rem);
-  line-height: 1.05;
-  letter-spacing: -0.01em;
-  color: var(--parchment);
-  margin: 0 0 1.1rem;
-}
-
-.hero-title em {
-  font-style: italic;
-  font-weight: 500;
-  color: var(--brass-light);
-}
-
-.hero-sub {
-  font-size: 1rem;
-  line-height: 1.6;
-  color: var(--mist);
-  max-width: 460px;
-  margin: 0 auto 2.4rem;
-}
-
-.log-entry-form {
-  text-align: left;
-  max-width: 480px;
-  margin: 0 auto;
-}
-
-.log-entry-row {
-  display: flex;
-  border-bottom: 1.5px solid var(--brass);
-  padding-bottom: 0.6rem;
-  gap: 0.75rem;
-  align-items: center;
-}
-
-.log-entry-row input {
-  flex: 1;
-  background: transparent;
-  border: none;
-  color: var(--parchment);
-  font-family: var(--font-mono);
-  font-size: 1.05rem;
-  padding: 0.35rem 0.1rem;
-}
-
-.log-entry-row input::placeholder {
-  color: #5c7085;
-}
-
-.log-entry-row input:focus {
-  outline: none;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Buttons                                                            */
-/* ------------------------------------------------------------------ */
-
-.btn-stamp {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  background: var(--brass);
-  color: #1a1204;
-  border: none;
-  border-radius: var(--radius);
-  padding: 0.7rem 1.3rem;
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  white-space: nowrap;
-  transition: transform 0.15s ease, background 0.15s ease;
-}
-
-.btn-stamp:hover:not(:disabled) {
-  background: var(--brass-light);
-  transform: translateY(-1px);
-}
-
-.btn-stamp:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
-.btn-stamp--full {
-  width: 100%;
-  justify-content: center;
-  margin-top: 1.4rem;
-}
-
-.btn-ghost {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  background: transparent;
-  color: var(--brass-light);
-  border: 1px solid var(--brass);
-  border-radius: var(--radius);
-  padding: 0.65rem 1.25rem;
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  transition: background 0.15s ease;
-}
-
-.btn-ghost:hover:not(:disabled) {
-  background: rgba(200, 153, 47, 0.12);
-}
-
-.btn-ghost:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.back-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  background: none;
-  border: none;
-  color: var(--mist);
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  padding: 0;
-  margin-bottom: 1.4rem;
-}
-
-.back-link:hover {
-  color: var(--brass-light);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Manifest (results) screen                                          */
-/* ------------------------------------------------------------------ */
-
-.manifest {
-  flex: 1;
-  max-width: 1180px;
-  width: 100%;
-  margin: 0 auto;
-  padding: clamp(1.75rem, 4vw, 3.25rem) clamp(1.25rem, 4vw, 2.5rem) 3rem;
-}
-
-.manifest-header {
-  border-bottom: 1px dashed var(--panel-border);
-  padding-bottom: 1.4rem;
-  margin-bottom: 2rem;
-}
-
-.manifest-title {
-  font-family: var(--font-display);
-  font-weight: 500;
-  font-style: italic;
-  font-size: clamp(1.7rem, 3.5vw, 2.3rem);
-  color: var(--parchment);
-  margin: 0 0 0.5rem;
-}
-
-.manifest-count {
-  font-family: var(--font-mono);
-  font-size: 0.8rem;
-  color: var(--mist);
-  margin: 0;
-}
-
-.alert-rust {
-  background: rgba(184, 80, 63, 0.12);
-  border-left: 3px solid var(--rust);
-  color: #e8a99c;
-  font-family: var(--font-mono);
-  font-size: 0.85rem;
-  padding: 0.9rem 1.1rem;
-  border-radius: 0 var(--radius) var(--radius) 0;
-  margin-bottom: 1.75rem;
-}
-
-.state-block {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.9rem;
-  text-align: center;
-  color: var(--mist);
-  padding: 4.5rem 1rem;
-  font-family: var(--font-mono);
-  font-size: 0.9rem;
-}
-
-.state-block p {
-  margin: 0;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Card grid                                                          */
-/* ------------------------------------------------------------------ */
-
-.card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(272px, 1fr));
-  gap: 1.1rem;
-}
-
-.chart-card {
-  background: var(--parchment);
-  color: var(--ink-text);
-  border-radius: var(--radius);
-  padding: 1.1rem 1.15rem 1.3rem;
-  display: flex;
-  flex-direction: column;
-  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
-}
-
-.card-top-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 0.7rem;
-}
-
-.entry-no {
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: var(--parchment-ink);
-  opacity: 0.55;
-}
-
-.rating-seal {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  border: 1px solid var(--brass);
-  color: #7a5a12;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  font-weight: 600;
-  padding: 0.15rem 0.5rem;
-  border-radius: 999px;
-}
-
-.rating-seal svg {
-  color: var(--brass);
-}
-
-.card-media {
-  border-radius: var(--radius);
-  overflow: hidden;
-  aspect-ratio: 16 / 10;
-  margin-bottom: 0.9rem;
-  background: var(--parchment-2);
-}
-
-.card-media-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.card-media-empty {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #a2946a;
-  border: 1px dashed #c9b98a;
-}
-
-.card-name {
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 1.15rem;
-  line-height: 1.25;
-  margin: 0 0 0.7rem;
-}
-
-.card-detail-list {
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.45rem;
-}
-
-.detail-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
-  font-family: var(--font-mono);
-  font-size: 0.79rem;
-  line-height: 1.4;
-  color: #3d4753;
-}
-
-.detail-row svg {
-  flex-shrink: 0;
-  margin-top: 0.15rem;
-  color: #8a7a45;
-}
-
-.detail-row dd {
-  margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-
-.detail-row a {
-  text-decoration: underline;
-  text-decoration-color: rgba(122, 90, 18, 0.4);
-}
-
-.review-count {
-  margin: 0.85rem 0 0;
-  padding-top: 0.7rem;
-  border-top: 1px dashed #cabb92;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  color: #6b5e3a;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Manifest actions                                                   */
-/* ------------------------------------------------------------------ */
-
-.manifest-actions {
-  display: flex;
-  gap: 0.9rem;
-  justify-content: center;
-  flex-wrap: wrap;
-  margin-top: 2.5rem;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Login screen                                                       */
-/* ------------------------------------------------------------------ */
-
-.login-screen {
-  position: relative;
-  min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2rem;
-  overflow: hidden;
-}
-
-.login-grid {
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(var(--panel-border) 1px, transparent 1px),
-    linear-gradient(90deg, var(--panel-border) 1px, transparent 1px);
-  background-size: 44px 44px;
-  opacity: 0.2;
-  mask-image: radial-gradient(ellipse at center, black 5%, transparent 75%);
-}
-
-.login-card {
-  position: relative;
-  z-index: 1;
-  width: 100%;
-  max-width: 380px;
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-radius: var(--radius);
-  padding: 2.4rem 2.1rem;
-  text-align: center;
-}
-
-.login-icon {
-  color: var(--brass);
-  display: inline-flex;
-  margin-bottom: 1rem;
-}
-
-.login-title {
-  font-family: var(--font-display);
-  font-weight: 500;
-  font-size: 1.55rem;
-  color: var(--parchment);
-  margin: 0 0 0.6rem;
-}
-
-.login-sub {
-  color: var(--mist);
-  font-size: 0.9rem;
-  line-height: 1.5;
-  margin: 0 0 1.6rem;
-}
-
-.login-form {
-  text-align: left;
-}
-
-.login-form input {
-  width: 100%;
-  background: var(--ink);
-  border: 1px solid var(--panel-border);
-  border-radius: var(--radius);
-  color: var(--parchment);
-  font-family: var(--font-mono);
-  font-size: 0.95rem;
-  padding: 0.75rem 0.9rem;
-}
-
-.login-form input:focus {
-  outline: none;
-  border-color: var(--brass);
-}
+      {result.rating && (
+        <p className="review-count">
+          {result.userRatingCount || 0} reviews logged
+        </p>
+      )}
+    </article>
+  );
+};
 
 /* ------------------------------------------------------------------ */
 /*  Footer                                                             */
 /* ------------------------------------------------------------------ */
 
-.footer {
-  border-top: 1px dashed var(--panel-border);
-  padding: 1.1rem 1.5rem;
-  text-align: center;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.04em;
-  color: var(--mist);
-}
+const Footer = () => (
+  <footer className="footer">
+    <span>Prospect Log</span>
+    <span className="footer-dot">·</span>
+    <span>Built by Abdul Bari, {new Date().getFullYear()}</span>
+  </footer>
+);
 
-.footer-dot {
-  margin: 0 0.5rem;
-  color: var(--brass);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Small screens                                                      */
-/* ------------------------------------------------------------------ */
-
-@media (max-width: 480px) {
-  .hero-content {
-    padding: 2.2rem 1.25rem;
-  }
-
-  .log-entry-row {
-    flex-wrap: wrap;
-  }
-
-  .btn-stamp {
-    width: 100%;
-    justify-content: center;
-  }
-
-  .card-grid {
-    grid-template-columns: 1fr;
-  }
-}
+export default App;
