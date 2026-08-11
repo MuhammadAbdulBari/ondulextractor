@@ -1,447 +1,657 @@
-import React, { useState, useRef, useEffect } from "react";
-import { saveAs } from "file-saver";
-import * as XLSX from "xlsx";
-import "./App.css";
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,340;0,9..144,500;0,9..144,600;1,9..144,500;1,9..144,600&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
-// 🔑 Set your secret key here
-const SECRET_KEY = "ondulex&098";
-const SESSION_DURATION = 24 * 60 * 60 * 1000; // 1 day in ms
+/* ------------------------------------------------------------------ */
+/*  Tokens                                                             */
+/* ------------------------------------------------------------------ */
 
-function App() {
-  const [activeTab, setActiveTab] = useState("search");
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [hasMore, setHasMore] = useState(false);
+:root {
+  --ink: #0f1b28;
+  --ink-2: #14233570;
+  --panel: #17263a;
+  --panel-border: #2a3d54;
+  --parchment: #ede3c8;
+  --parchment-2: #e3d7b3;
+  --parchment-ink: #22293163;
+  --brass: #c8992f;
+  --brass-light: #e3b94f;
+  --rust: #b8503f;
+  --mist: #91a6b9;
+  --ink-text: #1c2733;
 
-  // auth states
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [enteredKey, setEnteredKey] = useState("");
+  --font-display: "Fraunces", Georgia, serif;
+  --font-body: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
 
-  // keep service + map + pagination in refs so they're stable across renders
-  // and never captured in a stale closure
-  const serviceRef = useRef(null);
-  const mapRef = useRef(null);
-  const paginationRef = useRef(null);
-  const isFetchingRef = useRef(false); // hard guard against double-calls
-
-  // ✅ Check session on app load
-  useEffect(() => {
-    const savedSession = localStorage.getItem("onduleSession");
-    if (savedSession) {
-      const sessionData = JSON.parse(savedSession);
-      if (Date.now() < sessionData.expiry) {
-        setIsAuthenticated(true);
-      } else {
-        localStorage.removeItem("onduleSession"); // expired
-      }
-    }
-  }, []);
-
-  // ✅ Handle login
-  const handleLogin = (e) => {
-    e.preventDefault();
-    if (enteredKey === SECRET_KEY) {
-      const expiry = Date.now() + SESSION_DURATION;
-      localStorage.setItem(
-        "onduleSession",
-        JSON.stringify({ key: SECRET_KEY, expiry })
-      );
-      setIsAuthenticated(true);
-    } else {
-      alert("❌ Invalid key. Please try again.");
-    }
-  };
-
-  // Get (or lazily create) a single stable, DOM-attached, properly
-  // initialized map + PlacesService. Reusing the SAME service instance
-  // across the whole session (search + all "load more" pages) instead of
-  // recreating it every search is important for pagination reliability.
-  const getService = () => {
-    if (!window.google) {
-      throw new Error("Google Maps SDK not loaded. Check index.html script.");
-    }
-
-    if (!mapRef.current) {
-      // A real, DOM-attached div with center/zoom set — some Places
-      // Service behavior (including pagination) has been reported as
-      // flakier on fully detached / unconfigured map instances.
-      const container = document.createElement("div");
-      container.style.display = "none";
-      document.body.appendChild(container);
-
-      mapRef.current = new window.google.maps.Map(container, {
-        center: { lat: 0, lng: 0 },
-        zoom: 2,
-      });
-    }
-
-    if (!serviceRef.current) {
-      serviceRef.current = new window.google.maps.places.PlacesService(
-        mapRef.current
-      );
-    }
-
-    return serviceRef.current;
-  };
-
-  // Fetch details for a batch of place results, waiting for ALL of them
-  // to resolve before we touch loading/pagination state again. This
-  // prevents "Load More" from becoming clickable (and firing nextPage())
-  // while getDetails() calls from the previous page are still in flight
-  // on the same PlacesService instance.
-  const fetchDetailsForResults = (service, placesResults) => {
-    const detailPromises = placesResults.map(
-      (place) =>
-        new Promise((resolve) => {
-          service.getDetails(
-            {
-              placeId: place.place_id,
-              fields: [
-                "name",
-                "formatted_address",
-                "formatted_phone_number",
-                "website",
-                "rating",
-                "user_ratings_total",
-                "photos",
-              ],
-            },
-            (details, detailsStatus) => {
-              if (
-                detailsStatus ===
-                window.google.maps.places.PlacesServiceStatus.OK
-              ) {
-                resolve(details);
-              } else {
-                // fallback if details fails — keep the basic result
-                resolve(place);
-              }
-            }
-          );
-        })
-    );
-
-    return Promise.all(detailPromises);
-  };
-
-  // Shared handler for both the initial textSearch AND every nextPage()
-  // call (Google reuses the same callback for pagination pages).
-  const placesCallback = (res, status, pagination) => {
-    if (status === window.google.maps.places.PlacesServiceStatus.OK && res) {
-      const service = serviceRef.current;
-
-      fetchDetailsForResults(service, res)
-        .then((allDetails) => {
-          setResults((prev) => [...prev, ...allDetails]);
-          setActiveTab("results");
-
-          paginationRef.current = pagination || null;
-          setHasMore(!!(pagination && pagination.hasNextPage));
-        })
-        .catch((err) => {
-          console.error("Error fetching place details:", err);
-          setError("Something went wrong while fetching place details.");
-        })
-        .finally(() => {
-          setLoading(false);
-          isFetchingRef.current = false;
-        });
-    } else {
-      console.error("Places request failed. Status:", status, "Result:", res);
-      setError("Google Places request failed: " + status);
-      setLoading(false);
-      isFetchingRef.current = false;
-      paginationRef.current = null;
-      setHasMore(false);
-    }
-  };
-
-  const handleSearch = async (e) => {
-    e.preventDefault();
-    if (!query.trim()) return;
-    if (isFetchingRef.current) return; // guard against double submit
-
-    setLoading(true);
-    setError("");
-    setResults([]);
-    paginationRef.current = null;
-    setHasMore(false);
-    isFetchingRef.current = true;
-
-    try {
-      const service = getService();
-      const request = { query };
-      service.textSearch(request, placesCallback);
-    } catch (err) {
-      console.error("Search error:", err);
-      setError(err.message || "An error occurred");
-      setLoading(false);
-      isFetchingRef.current = false;
-    }
-  };
-
-  const loadMore = () => {
-    // Hard guards: must have a valid pagination object, it must still
-    // report hasNextPage, and we must not already be mid-fetch.
-    if (!paginationRef.current) return;
-    if (!paginationRef.current.hasNextPage) {
-      setHasMore(false);
-      return;
-    }
-    if (isFetchingRef.current) return;
-
-    isFetchingRef.current = true;
-    setLoading(true);
-
-    // Google requires a short delay before calling nextPage() after the
-    // previous page finished rendering.
-    setTimeout(() => {
-      // Re-check right before firing, in case state changed during the delay
-      if (paginationRef.current && paginationRef.current.hasNextPage) {
-        try {
-          paginationRef.current.nextPage();
-        } catch (err) {
-          console.error("nextPage() threw:", err);
-          setError("Could not load more results. Please try searching again.");
-          setLoading(false);
-          isFetchingRef.current = false;
-        }
-      } else {
-        setLoading(false);
-        isFetchingRef.current = false;
-        setHasMore(false);
-      }
-    }, 2000);
-  };
-
-  const downloadExcel = () => {
-    const worksheet = XLSX.utils.json_to_sheet(
-      results.map((item) => ({
-        Name: item.name || "N/A",
-        Address: item.formatted_address || "N/A",
-        Phone: item.formatted_phone_number || "N/A",
-        Website: item.website || "N/A",
-        Rating: item.rating || "N/A",
-        "Total Reviews": item.user_ratings_total || "0",
-      }))
-    );
-
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Google Leads");
-
-    const excelBuffer = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
-    const data = new Blob([excelBuffer], {
-      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    });
-
-    const sanitizedQuery = query.replace(/[^a-zA-Z0-9_-]/g, "_");
-    saveAs(
-      data,
-      `leads_${sanitizedQuery}_${new Date().toISOString().slice(0, 10)}.xlsx`
-    );
-  };
-
-  // 🔐 Show login screen first if not authenticated
-  if (!isAuthenticated) {
-    return (
-      <div className="login-screen" style={{ textAlign: "center", marginTop: "100px" }}>
-        <h1>🔑 Enter Access Key</h1>
-        <form onSubmit={handleLogin} style={{ marginTop: "20px" }}>
-          <input
-            type="password"
-            value={enteredKey}
-            onChange={(e) => setEnteredKey(e.target.value)}
-            placeholder="Enter your key..."
-            required
-            style={{ padding: "10px", width: "250px" }}
-          />
-          <br />
-          <button type="submit" style={{ marginTop: "15px", padding: "10px 20px" }}>
-            Unlock
-          </button>
-        </form>
-      </div>
-    );
-  }
-
-  // ✅ Main app after login
-  return (
-    <div className="App">
-      {activeTab === "search" && (
-        <SearchSection
-          query={query}
-          setQuery={setQuery}
-          handleSearch={handleSearch}
-          loading={loading}
-        />
-      )}
-
-      {activeTab === "results" && (
-        <ResultsSection
-          query={query}
-          results={results}
-          loading={loading}
-          error={error}
-          onBack={() => setActiveTab("search")}
-          onDownload={downloadExcel}
-          onLoadMore={loadMore}
-          hasMore={hasMore}
-        />
-      )}
-
-      <Footer />
-    </div>
-  );
+  --radius: 3px;
 }
 
-// Search Section Component
-const SearchSection = ({ query, setQuery, handleSearch, loading }) => (
-  <section className="search-section">
-    <div className="search-box">
-      <h1>🔍 Extract Google Maps Leads</h1>
-      <form onSubmit={handleSearch}>
-        <input
-          type="text"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="e.g. Restaurant in Karachi"
-          required
-          disabled={loading}
-        />
-        <button type="submit" disabled={loading}>
-          {loading ? (
-            <>
-              <i className="fas fa-spinner fa-spin me-2"></i>
-              Searching...
-            </>
-          ) : (
-            <>
-              <i className="fas fa-search me-2"></i>
-              Search Now
-            </>
-          )}
-        </button>
-      </form>
-    </div>
-  </section>
-);
+* {
+  box-sizing: border-box;
+}
 
-// Results Section Component
-const ResultsSection = ({
-  query,
-  results,
-  loading,
-  error,
-  onBack,
-  onDownload,
-  onLoadMore,
-  hasMore,
-}) => (
-  <div className="container py-5">
-    <div className="header-text">
-      <button onClick={onBack} className="btn btn-outline-primary btn-sm btn-back">
-        <i className="fas fa-arrow-left me-1"></i>Back to Search
-      </button>
-      <h2>
-        🔍 Results for: <em>{query}</em>
-      </h2>
-      <p className="text-muted">Showing extracted business contact details</p>
-    </div>
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--ink);
+  color: var(--parchment);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
 
-    {error && <div className="alert alert-danger text-center">{error}</div>}
+.App {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
 
-    {loading && (
-      <div className="text-center">
-        <div className="spinner-border text-primary" role="status">
-          <span className="visually-hidden">Loading...</span>
-        </div>
-        <p className="mt-2">Fetching results from Google Maps...</p>
-      </div>
-    )}
+a {
+  color: inherit;
+}
 
-    {results.length > 0 && (
-      <>
-        <div className="row g-4">
-          {results.map((result, index) => (
-            <ResultCard key={index} result={result} />
-          ))}
-        </div>
+button {
+  font-family: var(--font-body);
+  cursor: pointer;
+}
 
-        <div className="mt-4 d-flex gap-2 justify-content-center">
-          <button onClick={onDownload} className="btn btn-success">
-            <i className="fas fa-file-excel me-2"></i>Download Excel
-          </button>
-          {hasMore && (
-            <button onClick={onLoadMore} className="btn btn-primary" disabled={loading}>
-              {loading ? "Loading..." : "Load More"}
-            </button>
-          )}
-        </div>
-      </>
-    )}
+button:focus-visible,
+input:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--brass-light);
+  outline-offset: 3px;
+}
 
-    {!loading && results.length === 0 && !error && (
-      <div className="text-center text-muted">
-        <i className="fas fa-map-marked-alt fa-2x mb-3"></i>
-        <p>No results found. Please try a different search.</p>
-      </div>
-    )}
-  </div>
-);
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--brass);
+  margin: 0 0 0.6rem;
+}
 
-// Result Card Component
-const ResultCard = ({ result }) => (
-  <div className="col-md-4">
-    <div className="lead-card">
-      {result.photos && result.photos[0] ? (
-        <img
-          className="lead-img"
-          src={result.photos[0].getUrl({ maxWidth: 400 })}
-        />
-      ) : (
-//        <img
-//   className="lead-img"
-//   src="https://via.placeholder.com/400x200?text=No+Image"
+.field-label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--mist);
+  margin-bottom: 0.5rem;
+}
 
-// />
-      )}
+.muted {
+  color: var(--mist);
+}
 
-      <div className="lead-name">{result.name || "N/A"}</div>
-      <div className="lead-detail">
-        <i className="fas fa-map-marker-alt me-2"></i>
-        {result.formatted_address || "N/A"}
-      </div>
-      <div className="lead-detail">
-        <i className="fas fa-phone-alt me-2"></i>
-        {result.formatted_phone_number || "N/A"}
-      </div>
-      <div className="lead-detail">
-        <i className="fas fa-globe me-2"></i>
-        {result.website ? (
-          <a href={result.website} target="_blank" rel="noopener noreferrer">
-            {new URL(result.website).hostname}
-          </a>
-        ) : (
-          "N/A"
-        )}
-      </div>
+/* ------------------------------------------------------------------ */
+/*  Tick rule — decorative chart-edge scale, reused across screens     */
+/* ------------------------------------------------------------------ */
 
-      {result.rating && (
-        <div className="lead-detail mt-2">
-          ⭐ {result.rating} ({result.user_ratings_total || 0} reviews)
-        </div>
-      )}
-    </div>
-  </div>
-);
+.tick-rule {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  padding: 0 clamp(1.5rem, 6vw, 5rem);
+  height: 16px;
+  opacity: 0.5;
+}
 
-// Footer Component
-const Footer = () => (
-  <footer className="footer">
-    &copy; {new Date().getFullYear()} | Built by Abdul Bari | All rights reserved.
-  </footer>
-);
+.tick {
+  width: 1px;
+  height: 5px;
+  background: var(--brass);
+  opacity: 0.55;
+}
 
-export default App;
+.tick--major {
+  height: 10px;
+  opacity: 0.85;
+}
+
+@media (max-width: 640px) {
+  .tick-rule {
+    display: none;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Compass rose — the signature mark                                 */
+/* ------------------------------------------------------------------ */
+
+.compass-rose {
+  color: var(--brass);
+  display: block;
+}
+
+.compass-needle-brass {
+  fill: var(--brass-light);
+}
+
+.compass-needle-dark {
+  fill: var(--mist);
+  opacity: 0.55;
+}
+
+.compass-label {
+  font-family: var(--font-mono);
+  font-size: 7px;
+  fill: var(--brass);
+  letter-spacing: 0.05em;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .compass-rose--spinning {
+    animation: compass-spin 2.4s linear infinite;
+  }
+}
+
+@keyframes compass-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Search hero — the chart room                                      */
+/* ------------------------------------------------------------------ */
+
+.chart-hero {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-height: 100vh;
+  overflow: hidden;
+  padding: 1.75rem 0;
+}
+
+.chart-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--panel-border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--panel-border) 1px, transparent 1px);
+  background-size: 44px 44px;
+  opacity: 0.22;
+  mask-image: radial-gradient(ellipse at center, black 5%, transparent 78%);
+}
+
+.hero-content {
+  position: relative;
+  z-index: 1;
+  max-width: 640px;
+  margin: auto;
+  padding: 3rem 1.75rem;
+  text-align: center;
+}
+
+.compass-wrap {
+  display: inline-flex;
+  margin-bottom: 1.5rem;
+}
+
+.hero-title {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: clamp(2.4rem, 6vw, 3.6rem);
+  line-height: 1.05;
+  letter-spacing: -0.01em;
+  color: var(--parchment);
+  margin: 0 0 1.1rem;
+}
+
+.hero-title em {
+  font-style: italic;
+  font-weight: 500;
+  color: var(--brass-light);
+}
+
+.hero-sub {
+  font-size: 1rem;
+  line-height: 1.6;
+  color: var(--mist);
+  max-width: 460px;
+  margin: 0 auto 2.4rem;
+}
+
+.log-entry-form {
+  text-align: left;
+  max-width: 480px;
+  margin: 0 auto;
+}
+
+.log-entry-row {
+  display: flex;
+  border-bottom: 1.5px solid var(--brass);
+  padding-bottom: 0.6rem;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.log-entry-row input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--parchment);
+  font-family: var(--font-mono);
+  font-size: 1.05rem;
+  padding: 0.35rem 0.1rem;
+}
+
+.log-entry-row input::placeholder {
+  color: #5c7085;
+}
+
+.log-entry-row input:focus {
+  outline: none;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Buttons                                                            */
+/* ------------------------------------------------------------------ */
+
+.btn-stamp {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--brass);
+  color: #1a1204;
+  border: none;
+  border-radius: var(--radius);
+  padding: 0.7rem 1.3rem;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.btn-stamp:hover:not(:disabled) {
+  background: var(--brass-light);
+  transform: translateY(-1px);
+}
+
+.btn-stamp:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.btn-stamp--full {
+  width: 100%;
+  justify-content: center;
+  margin-top: 1.4rem;
+}
+
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: transparent;
+  color: var(--brass-light);
+  border: 1px solid var(--brass);
+  border-radius: var(--radius);
+  padding: 0.65rem 1.25rem;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transition: background 0.15s ease;
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: rgba(200, 153, 47, 0.12);
+}
+
+.btn-ghost:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: none;
+  border: none;
+  color: var(--mist);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0;
+  margin-bottom: 1.4rem;
+}
+
+.back-link:hover {
+  color: var(--brass-light);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Manifest (results) screen                                          */
+/* ------------------------------------------------------------------ */
+
+.manifest {
+  flex: 1;
+  max-width: 1180px;
+  width: 100%;
+  margin: 0 auto;
+  padding: clamp(1.75rem, 4vw, 3.25rem) clamp(1.25rem, 4vw, 2.5rem) 3rem;
+}
+
+.manifest-header {
+  border-bottom: 1px dashed var(--panel-border);
+  padding-bottom: 1.4rem;
+  margin-bottom: 2rem;
+}
+
+.manifest-title {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-style: italic;
+  font-size: clamp(1.7rem, 3.5vw, 2.3rem);
+  color: var(--parchment);
+  margin: 0 0 0.5rem;
+}
+
+.manifest-count {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--mist);
+  margin: 0;
+}
+
+.alert-rust {
+  background: rgba(184, 80, 63, 0.12);
+  border-left: 3px solid var(--rust);
+  color: #e8a99c;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  padding: 0.9rem 1.1rem;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  margin-bottom: 1.75rem;
+}
+
+.state-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.9rem;
+  text-align: center;
+  color: var(--mist);
+  padding: 4.5rem 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+}
+
+.state-block p {
+  margin: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Card grid                                                          */
+/* ------------------------------------------------------------------ */
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(272px, 1fr));
+  gap: 1.1rem;
+}
+
+.chart-card {
+  background: var(--parchment);
+  color: var(--ink-text);
+  border-radius: var(--radius);
+  padding: 1.1rem 1.15rem 1.3rem;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
+}
+
+.card-top-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.7rem;
+}
+
+.entry-no {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--parchment-ink);
+  opacity: 0.55;
+}
+
+.rating-seal {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid var(--brass);
+  color: #7a5a12;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+}
+
+.rating-seal svg {
+  color: var(--brass);
+}
+
+.card-media {
+  border-radius: var(--radius);
+  overflow: hidden;
+  aspect-ratio: 16 / 10;
+  margin-bottom: 0.9rem;
+  background: var(--parchment-2);
+}
+
+.card-media-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.card-media-empty {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #a2946a;
+  border: 1px dashed #c9b98a;
+}
+
+.card-name {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1.15rem;
+  line-height: 1.25;
+  margin: 0 0 0.7rem;
+}
+
+.card-detail-list {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.detail-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.79rem;
+  line-height: 1.4;
+  color: #3d4753;
+}
+
+.detail-row svg {
+  flex-shrink: 0;
+  margin-top: 0.15rem;
+  color: #8a7a45;
+}
+
+.detail-row dd {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.detail-row a {
+  text-decoration: underline;
+  text-decoration-color: rgba(122, 90, 18, 0.4);
+}
+
+.review-count {
+  margin: 0.85rem 0 0;
+  padding-top: 0.7rem;
+  border-top: 1px dashed #cabb92;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: #6b5e3a;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Manifest actions                                                   */
+/* ------------------------------------------------------------------ */
+
+.manifest-actions {
+  display: flex;
+  gap: 0.9rem;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 2.5rem;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Login screen                                                       */
+/* ------------------------------------------------------------------ */
+
+.login-screen {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  overflow: hidden;
+}
+
+.login-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--panel-border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--panel-border) 1px, transparent 1px);
+  background-size: 44px 44px;
+  opacity: 0.2;
+  mask-image: radial-gradient(ellipse at center, black 5%, transparent 75%);
+}
+
+.login-card {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 380px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: 2.4rem 2.1rem;
+  text-align: center;
+}
+
+.login-icon {
+  color: var(--brass);
+  display: inline-flex;
+  margin-bottom: 1rem;
+}
+
+.login-title {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 1.55rem;
+  color: var(--parchment);
+  margin: 0 0 0.6rem;
+}
+
+.login-sub {
+  color: var(--mist);
+  font-size: 0.9rem;
+  line-height: 1.5;
+  margin: 0 0 1.6rem;
+}
+
+.login-form {
+  text-align: left;
+}
+
+.login-form input {
+  width: 100%;
+  background: var(--ink);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  color: var(--parchment);
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  padding: 0.75rem 0.9rem;
+}
+
+.login-form input:focus {
+  outline: none;
+  border-color: var(--brass);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Footer                                                             */
+/* ------------------------------------------------------------------ */
+
+.footer {
+  border-top: 1px dashed var(--panel-border);
+  padding: 1.1rem 1.5rem;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: var(--mist);
+}
+
+.footer-dot {
+  margin: 0 0.5rem;
+  color: var(--brass);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Small screens                                                      */
+/* ------------------------------------------------------------------ */
+
+@media (max-width: 480px) {
+  .hero-content {
+    padding: 2.2rem 1.25rem;
+  }
+
+  .log-entry-row {
+    flex-wrap: wrap;
+  }
+
+  .btn-stamp {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .card-grid {
+    grid-template-columns: 1fr;
+  }
+}
