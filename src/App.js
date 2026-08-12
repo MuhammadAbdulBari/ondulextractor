@@ -156,6 +156,9 @@ function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [enteredKey, setEnteredKey] = useState("");
 
+  // NEW: when true, only entries with no websiteUri are shown/exported
+  const [noWebsiteOnly, setNoWebsiteOnly] = useState(false);
+
   // kept in refs so they're stable across renders and never captured in a
   // stale closure
   const nextPageTokenRef = useRef(null);
@@ -224,6 +227,7 @@ function App() {
     setResults([]);
     nextPageTokenRef.current = null;
     setHasMore(false);
+    setNoWebsiteOnly(false); // reset filter on a fresh search
 
     runSearch(null);
   };
@@ -242,9 +246,19 @@ function App() {
     }, 2000);
   };
 
+  // NEW: toggles the "no website only" filter
+  const toggleNoWebsiteOnly = () => {
+    setNoWebsiteOnly((prev) => !prev);
+  };
+
+  // NEW: the list actually rendered/exported, respecting the filter
+  const visibleResults = noWebsiteOnly
+    ? results.filter((item) => !item.websiteUri)
+    : results;
+
   const downloadExcel = () => {
     const worksheet = XLSX.utils.json_to_sheet(
-      results.map((item) => ({
+      visibleResults.map((item) => ({
         Name: item.displayName?.text || "N/A",
         Address: item.formattedAddress || "N/A",
         Phone: item.nationalPhoneNumber || "N/A",
@@ -313,13 +327,15 @@ function App() {
       {activeTab === "results" && (
         <ResultsSection
           query={query}
-          results={results}
+          results={visibleResults}
           loading={loading}
           error={error}
           onBack={() => setActiveTab("search")}
           onDownload={downloadExcel}
           onLoadMore={loadMore}
           hasMore={hasMore}
+          noWebsiteOnly={noWebsiteOnly}
+          onToggleNoWebsiteOnly={toggleNoWebsiteOnly}
         />
       )}
 
@@ -390,6 +406,8 @@ const ResultsSection = ({
   onDownload,
   onLoadMore,
   hasMore,
+  noWebsiteOnly,
+  onToggleNoWebsiteOnly,
 }) => (
   <div className="manifest">
     <header className="manifest-header">
@@ -428,6 +446,15 @@ const ResultsSection = ({
         <div className="manifest-actions">
           <button onClick={onDownload} className="btn-stamp">
             <DownloadIcon /> Export manifest
+          </button>
+          {/* NEW: functional toggle button, no other UI/behavior changed */}
+          <button
+            type="button"
+            onClick={onToggleNoWebsiteOnly}
+            className="btn-ghost"
+            aria-pressed={noWebsiteOnly}
+          >
+            <GlobeIcon /> {noWebsiteOnly ? "Show all" : "No website only"}
           </button>
           {hasMore && (
             <button onClick={onLoadMore} className="btn-ghost" disabled={loading}>
